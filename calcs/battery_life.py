@@ -112,6 +112,7 @@ def _(np):
     # --- Brown-out thresholds (PVD levels, CH32L103 datasheet Table 3-4) ---
     PVD_TX_OK = 2.35  # PLS=011 rising edge; conservative for the check-before-send
     PVD_ABORT_OPTIONS = {"1.87 V (PLS=001)": 1.87, "2.08 V (PLS=010)": 2.08}
+    PVD_ABORT_FIRMWARE = "2.08 V (PLS=010)"  # what fw/remote.c uses (PVD_LEVEL_ABORT)
     VDD_MCU_MIN = 1.8
 
     # --- Usage assumptions ---
@@ -138,6 +139,7 @@ def _(np):
         OCV_CAP_MAH,
         OCV_V,
         PRESSES_PER_DAY,
+        PVD_ABORT_FIRMWARE,
         PVD_ABORT_OPTIONS,
         PVD_TX_OK,
         LED_IV_MA,
@@ -579,6 +581,7 @@ def _(LEAKAGE, MAH, PVD_ABORT_OPTIONS, PVD_TX_OK, CELL_NOMINAL_MAH, consumption,
 def _(
     CELL_NOMINAL_MAH,
     PRESSES_PER_DAY,
+    PVD_ABORT_FIRMWARE,
     REPEATS_PER_PRESS,
     i_leak_spec,
     mo,
@@ -586,17 +589,27 @@ def _(
     self_discharge_mah_per_year,
     standby_mah_per_year,
 ):
-    _rows = "\n".join(
-        f"| {r['case']} | {r['abort']} | {r['leakage']} | {r['usable_mah']:.0f} mAh ({r['usable_pct']:.0f} %) "
-        f"| {r['limited_by']} | {r['q_press_mc']:.2f} mC ({r['q_led_mc']:.2f} LED) "
-        f"| {r['presses']:,.0f} | {r['mah_per_year']:.1f} | **{r['years']:.1f}** |"
-        for r in results
-    )
-    mo.md(
-        f"""
-    | Temp | Abort level | Cap leakage | Usable (of {CELL_NOMINAL_MAH:.0f} mAh) | Limited by | Charge per press | Presses | mAh/year | Years |
-    |---|---|---|---|---|---|---|---|---|
-    {_rows}
+    _cols = ["Temp", "Abort level", "Cap leakage", f"Usable (of {CELL_NOMINAL_MAH:.0f} mAh)",
+             "Limited by", "Charge per press", "Presses", "mAh/year", "Years"]
+    _head = "".join(f"<th>{c}</th>" for c in _cols)
+    _body = []
+    for r in results:
+        # Highlight the expected case: firmware's abort level, typical leakage
+        _chosen = r["abort"] == PVD_ABORT_FIRMWARE and r["leakage"] == "typical"
+        _style = ' style="background:#fff3b0;font-weight:bold"' if _chosen else ""
+        _cells = [
+            r["case"], r["abort"] + (" ◀ firmware" if r["abort"] == PVD_ABORT_FIRMWARE else ""),
+            r["leakage"], f"{r['usable_mah']:.0f} mAh ({r['usable_pct']:.0f} %)", r["limited_by"],
+            f"{r['q_press_mc']:.2f} mC ({r['q_led_mc']:.2f} LED)", f"{r['presses']:,.0f}",
+            f"{r['mah_per_year']:.1f}", f"{r['years']:.1f}",
+        ]
+        _body.append(f"<tr{_style}>" + "".join(f"<td>{c}</td>" for c in _cells) + "</tr>")
+    mo.vstack([
+        mo.Html(f"<table><thead><tr>{_head}</tr></thead><tbody>{''.join(_body)}</tbody></table>"),
+        mo.md(
+            f"""
+    **Highlighted:** the expected battery life, with the firmware's abort level
+    ({PVD_ABORT_FIRMWARE}) and typical capacitor leakage.
 
     Assumes {PRESSES_PER_DAY} presses/day, each a frame plus {REPEATS_PER_PRESS}
     repeats, all at the stated temperature. Fixed drains: standby
@@ -604,7 +617,8 @@ def _(
     {self_discharge_mah_per_year:.1f} mAh/year, capacitor leakage at spec max
     {i_leak_spec * 1e6:.1f} µA ({i_leak_spec * 8760 * 1e3:.0f} mAh/year).
     """
-    )
+        ),
+    ])
     return
 
 

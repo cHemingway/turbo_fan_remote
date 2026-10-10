@@ -3,3 +3,7 @@
 *.hex
 *.lst
 *.map
+
+# clangd (regenerate with `make clangd`)
+compile_commands.json
+.cache/

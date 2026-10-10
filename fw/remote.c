@@ -7,7 +7,7 @@ is a full power reset, so every button press starts again at main(): read
 which button is held, send the NEC frame, send NEC repeat codes while it stays
 held (up to NEC_REPEAT_MAX_MS), go back to standby. The PVD guards against a
 flat battery: no transmission if VDD is already low, and a frame is cut short
-if VDD sags toward 1.8 V (see pvd_set_level()). A button still held at
+if VDD sags below ~2.08 V (see pvd_set_level()). A button still held at
 that point (stuck, or sat on) is armed to wake on its release instead, so a
 jammed button can't keep the chip awake and drain the coin cell.
 
@@ -122,9 +122,11 @@ static void ir_init(void)
 // (1.45-1.65 V), but it's only specified down to 1.8 V, so a flat coin cell
 // sagging under the LED load could leave it running out of spec. The PVD
 // watches VDD instead: before transmitting we check the resting voltage, and
-// during a frame we abort the moment VDD dips toward 1.8 V.
+// during a frame we abort if VDD dips below ~2.08 V. That leaves ~0.28 V
+// above the 1.8 V minimum for the untoleranced PVD thresholds, and per
+// calcs/battery_life.py costs only a few mAh over 1.87 V (PLS_MODE1).
 #define PVD_LEVEL_TX_OK    PWR_CTLR_PLS_MODE3 // 2.28 V falling / 2.35 V rising
-#define PVD_LEVEL_ABORT    PWR_CTLR_PLS_MODE1 // 1.87 V falling / 1.93 V rising
+#define PVD_LEVEL_ABORT    PWR_CTLR_PLS_MODE2 // 2.08 V falling / 2.14 V rising
 
 static void pvd_set_level(uint32_t level)
 {

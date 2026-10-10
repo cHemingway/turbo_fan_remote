@@ -1,0 +1,9 @@
+# clangd setup for the RISC-V gcc build (compile_commands.json from `make clangd`).
+# clang can't use gcc's flags/sysroot directly, so set the target here and point
+# at the Homebrew riscv-gnu-toolchain's newlib headers.
+CompileFlags:
+  Add:
+    - --target=riscv32-unknown-elf
+    - -ffreestanding
+    - -isystem/opt/homebrew/opt/riscv-gnu-toolchain/riscv64-unknown-elf/include
+  Remove: [-fno-tree-loop-distribute-patterns, -msmall-data-limit=*, -flto, -I/usr/include/newlib]
