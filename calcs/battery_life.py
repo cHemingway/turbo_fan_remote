@@ -340,7 +340,7 @@ def _(NEC_REPEAT_PERIOD_S):
         pad_to_period(nec_repeat()),
     ]
     FRAME_S = sum(d for d, _ in nec_frame(0x02))
-    return FRAME_S, PRESS_WINDOWS
+    return FRAME_S, PRESS_WINDOWS, nec_frame, nec_repeat, pad_to_period
 
 
 @app.cell
@@ -768,6 +768,136 @@ def _(mo):
     """)
     return
 
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Appendix: one button press in time
+
+    **NEC timing.** A full frame is a 9 ms leader burst, a 4.5 ms space,
+    32 bits and a 562.5 µs stop burst: 68.1 ms, the same for every code
+    because each byte is sent with its inverse. Each bit is a 562.5 µs burst
+    followed by a 562.5 µs space (0) or a 1687.5 µs space (1). While the
+    button stays held, repeat codes (9 ms burst, 2.25 ms space, 562.5 µs
+    burst = 11.8 ms) follow. Every transmission starts on a **108 ms** grid,
+    start to start. That leaves ~39.9 ms of silence after the full frame
+    and ~96.2 ms between repeats.
+
+    | Element | Burst | Space | Total |
+    |---|---|---|---|
+    | Leader | 9 ms | 4.5 ms | 13.5 ms |
+    | Bit 0 / bit 1 | 562.5 µs | 562.5 µs / 1687.5 µs | 1.125 / 2.25 ms |
+    | Full frame (incl. stop burst) | | | 68.1 ms |
+    | Repeat code | 9 ms + 562.5 µs | 2.25 ms | 11.8 ms |
+    | Frame / repeat period | | | 108 ms |
+
+    Below is a typical press (the full frame plus the repeats assumed in the
+    usage model) from a cell at **0 °C, halfway through its usable life**.
+    The 38 kHz carrier isn't drawn. LED current is the height of each carrier
+    pulse; the average during a burst is a third of that.
+    """)
+    return
+
+
+@app.cell
+def _(
+    CARRIER_DUTY,
+    CASES,
+    C_LED,
+    C_VDD,
+    I_RUN,
+    NEC_REPEAT_PERIOD_S,
+    PVD_ABORT_FIRMWARE,
+    R8,
+    REPEATS_PER_PRESS,
+    cell_model,
+    led_current,
+    nec_frame,
+    nec_repeat,
+    np,
+    pad_to_period,
+    results,
+):
+    TRACE_CASE = "0 °C"
+    _p = CASES[TRACE_CASE]
+    _usable = next(
+        r["usable_mah"]
+        for r in results
+        if r["case"] == TRACE_CASE and r["abort"] == PVD_ABORT_FIRMWARE and r["leakage"] == "typical"
+    )
+    trace_life_mah = 0.5 * _usable
+    _voc, _rint = cell_model(np.array([trace_life_mah]), _p["cap_scale"], _p["ocv_offset"], _p["ir_scale"])
+    _voc, _rint = float(_voc[0]), float(_rint[0])
+
+    # Same supply model as simulate(), but for one life point, recording every step
+    _segs = pad_to_period(nec_frame(0x02))
+    for _ in range(REPEATS_PER_PRESS):
+        _segs += pad_to_period(nec_repeat(), NEC_REPEAT_PERIOD_S)
+    _dt = 10e-6
+    _vdd = _vled = _voc
+    _t, _mark, _vdd_t, _vled_t, _ipk_t = [], [], [], [], []
+    _now = 0.0
+    for _duration, _is_mark in _segs:
+        for _ in range(int(round(_duration / _dt))):
+            _ipk = float(led_current(np.array([_vled]), _p["vf_shift"])[0]) if _is_mark else 0.0
+            _i_cell = (_voc - _vdd) / _rint
+            _i_r8 = (_vdd - _vled) / R8
+            _vdd += (_i_cell - _i_r8 - I_RUN) * _dt / C_VDD
+            _vled += (_i_r8 - CARRIER_DUTY * _ipk) * _dt / C_LED
+            _t.append(_now)
+            _mark.append(_is_mark)
+            _vdd_t.append(_vdd)
+            _vled_t.append(_vled)
+            _ipk_t.append(_ipk)
+            _now += _dt
+    trace = {
+        "t_ms": np.array(_t) * 1e3,
+        "mark": np.array(_mark, dtype=float),
+        "vdd": np.array(_vdd_t),
+        "vled": np.array(_vled_t),
+        "i_pk_ma": np.array(_ipk_t) * 1e3,
+        "voc": _voc,
+        "rint": _rint,
+    }
+    return TRACE_CASE, trace, trace_life_mah
+
+
+@app.cell(hide_code=True)
+def _(PVD_ABORT_OPTIONS, PVD_ABORT_FIRMWARE, TRACE_CASE, plt, trace, trace_life_mah):
+    _fig, (_a1, _a2, _a3) = plt.subplots(
+        3, 1, figsize=(10, 7), sharex=True, gridspec_kw={"height_ratios": [1, 2, 2]}
+    )
+    _t = trace["t_ms"]
+    _a1.fill_between(_t, 0, trace["mark"], step="post", color="tab:purple", lw=0)
+    _a1.set_yticks([0, 1], ["off", "38 kHz"])
+    _a1.set_ylim(-0.1, 1.3)
+    _a1.set_title(
+        f"One press, {TRACE_CASE}, {trace_life_mah:.0f} mAh used "
+        f"(OCV {trace['voc']:.2f} V, internal resistance {trace['rint']:.0f} Ω)"
+    )
+    _a1.annotate("full frame", (2, 1.05), fontsize=8)
+    for _k, _x in enumerate([108, 216, 324]):
+        _a1.annotate(f"repeat {_k + 1}", (_x + 1, 1.05), fontsize=8)
+
+    _a2.plot(_t, trace["vdd"], label="VDD (MCU)")
+    _a2.plot(_t, trace["vled"], label="VLED (C4–C6 reservoir)")
+    _a2.axhline(PVD_ABORT_OPTIONS[PVD_ABORT_FIRMWARE], color="tab:orange", ls="--", lw=1,
+                label=f"Abort level {PVD_ABORT_FIRMWARE} (checked on VDD)")
+    _a2.set_ylabel("Voltage (V)")
+    _a2.legend(fontsize=8, loc="lower right")
+    _a2.grid(alpha=0.3)
+
+    _a3.plot(_t, trace["i_pk_ma"], color="tab:red", lw=0.8)
+    _a3.set_ylabel("LED pulse current (mA)")
+    _a3.set_xlabel("Time from start of first frame (ms); boot + debounce (~17 ms) come before this")
+    _a3.set_ylim(0, max(110, trace["i_pk_ma"].max() * 1.1))
+    _a3.grid(alpha=0.3)
+    for _ax in (_a1, _a2, _a3):
+        for _x in (108, 216, 324):
+            _ax.axvline(_x, color="0.6", lw=0.6, ls=":")
+    _fig.tight_layout()
+    _fig
+    return
 
 if __name__ == "__main__":
     app.run()
