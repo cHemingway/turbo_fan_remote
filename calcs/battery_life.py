@@ -254,6 +254,18 @@ def _(mo):
     fall off faster than a straight line. Radiant intensity is roughly
     proportional to current (TSAL6200 Fig. 5) and range goes as its square
     root, so relative range ≈ √(I / 100 mA).
+
+    **No saturation in this design.** In the
+    [TSAL6200 datasheet](https://www.vishay.com/docs/81010/tsal6200.pdf),
+    Fig. 5 (radiant intensity vs current) and Fig. 6 (radiant power vs
+    current) are close to linear from 1 mA to 1 A. The table gives
+    72 mW/sr typ at 100 mA and 600 mW/sr at 1 A, so 10× the current gives
+    ~8.3× the light: ~15–20 % droop, and only near 1 A. The LED here runs at
+    40–170 mA, well inside the linear part. Self-heating is negligible at
+    this duty cycle; Fig. 7 gives −0.6 %/K, so it's ~15 % *brighter* at
+    0 °C than at 25 °C, which isn't modelled here. Because light tracks LED
+    current, and the battery supplies that same current, light per unit of
+    battery charge is roughly independent of R7.
     """)
     return
 
@@ -266,9 +278,9 @@ def _(LED_IV_MA, LED_IV_V, Q1_RDS, R7, np):
         """TSAL6200 forward voltage, interpolated in log(I)."""
         return np.interp(np.log10(i_amps * 1e3), np.log10(LED_IV_MA), LED_IV_V) + vf_shift
 
-    def led_current(vled, vf_shift=0.0):
+    def led_current(vled, vf_shift=0.0, r7=R7):
         """LED pulse current (A) for a given VLED: I-V curve meets the R7 + Q1 load line."""
-        v_needed = led_vf(_I_GRID, vf_shift) + _I_GRID * (R7 + Q1_RDS)
+        v_needed = led_vf(_I_GRID, vf_shift) + _I_GRID * (r7 + Q1_RDS)
         return np.interp(vled, v_needed, _I_GRID, left=0.0)
 
     return led_current, led_vf
@@ -345,10 +357,11 @@ def _(NEC_REPEAT_PERIOD_S):
 
 @app.cell
 def _(CARRIER_DUTY, C_LED, C_VDD, I_RUN, R8, led_current, np):
-    def simulate(voc, rint, vf_shift, windows, dt=10e-6, r8=R8, c_led=C_LED):
+    def simulate(voc, rint, vf_shift, windows, dt=10e-6, r8=R8, c_led=C_LED, r7=None):
         """Simulate supply nodes for every (voc, rint) pair at once.
 
-        r8 and c_led may be scalars or arrays matching voc (for sweeps).
+        r8 and c_led may be scalars or arrays matching voc (for sweeps); r7
+        overrides the schematic's LED resistor (scalar).
 
         Returns per-life-point minimum VDD and minimum VLED, plus the LED
         charge drawn in each window (coulombs, per life point).
@@ -362,7 +375,11 @@ def _(CARRIER_DUTY, C_LED, C_VDD, I_RUN, R8, led_current, np):
             q = np.zeros_like(vdd)
             for duration, mark in window:
                 for _ in range(int(round(duration / dt))):
-                    i_led = CARRIER_DUTY * led_current(vled, vf_shift) if mark else 0.0
+                    i_led = (
+                        CARRIER_DUTY * led_current(vled, vf_shift, *(() if r7 is None else (r7,)))
+                        if mark
+                        else 0.0
+                    )
                     i_cell = (voc - vdd) / rint
                     i_r8 = (vdd - vled) / r8
                     vdd = vdd + (i_cell - i_r8 - I_RUN) * dt / C_VDD
@@ -446,6 +463,7 @@ def _(
         i_leak_spec,
         self_discharge_mah_per_year,
         standby_mah_per_year,
+        t_awake,
     )
 
 
@@ -897,6 +915,269 @@ def _(PVD_ABORT_OPTIONS, PVD_ABORT_FIRMWARE, TRACE_CASE, plt, trace, trace_life_
             _ax.axvline(_x, color="0.6", lw=0.6, ls=":")
     _fig.tight_layout()
     _fig
+    return
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Appendix B: choosing R7
+
+    The single-press trace shows the LED current falling from ~86 mA to
+    ~42 mA during the 9 ms leader, as the reservoir drains. Would a bigger R7
+    help? It lowers the first pulse, but it also drains the reservoir more
+    slowly. The question is which R7 gives the strongest *weakest* pulse,
+    since that pulse limits range. In a press it's the end of the leader.
+
+    ### Model
+
+    During one burst of length $T$, take:
+
+    - **Source.** The cell and R8 form a Thévenin source:
+      $U_0 = V_{oc} - R_{int} I_{run}$ behind $R_s = R_{int} + R_8$. VDD's own
+      10 µF is ignored (its time constant is ~0.2 ms, much less than $T$).
+    - **LED.** Linearised as $V_F + r_d I$ around the operating point. The
+      pulse path is $R = R_7 + R_{DS(on)} + r_d$.
+    - **Carrier.** With duty $d$, the reservoir $C$ supplies an average of
+      $d\,i$, where $i$ is the pulse current.
+
+    With $x = v_{LED} - V_F$ and $U = U_0 - V_F$:
+
+    $$C\,\dot x = \frac{U - x}{R_s} - \frac{d\,x}{R}, \qquad x(0) = U \;\text{(rested)}$$
+
+    which is first order, so
+
+    $$x(t) = x_\infty + (U - x_\infty)\,e^{-t/\tau},\qquad
+    x_\infty = U\frac{R}{R + a},\qquad \tau = C\,\frac{R_s R}{R + a},\qquad a = d\,R_s$$
+
+    and the pulse current $i = x/R$ is
+
+    $$\boxed{\,i(t) = \frac{U}{R + a}\left[\,1 + \frac{a}{R}\,e^{-t/\tau}\right]}$$
+
+    ### Limits: a smaller R7 wins
+
+    - First pulse: $i(0) = U/R$.
+    - A very long burst: $i(\infty) = U/(R + a)$.
+
+    Both strictly decrease with $R$. So for very short or very long bursts,
+    a smaller R7 is always better, and making R7 *bigger* can't help.
+
+    ### Finite burst: an optimum exists, but has no closed form
+
+    Substitute $s = 1/R$. Then $T/\tau = k + \beta s$ with
+    $k = T/(C R_s)$ and $\beta = d\,T/C$, giving
+
+    $$\frac{i(T)}{U} = \frac{s}{1 + a s}\left[\,1 + a\,e^{-k}\, s\, e^{-\beta s}\right]$$
+
+    $$\frac{\partial}{\partial s}\frac{i(T)}{U} =
+    \frac{1 + a\,e^{-k}\, s\, e^{-\beta s}\big[(2 - \beta s)(1 + a s) - a s\big]}{(1 + a s)^2}$$
+
+    The optimum is where the numerator is zero. That equation mixes a
+    polynomial with $e^{-\beta s}$, and the quadratic factor stops it reducing
+    to the Lambert W function. **There's no elementary closed form for the
+    optimal R7**, but it's a trivial one-dimensional numerical solve.
+
+    ### Closed-form bounds
+
+    1. **Optimum is below $R_{crit}$.** A root needs the bracket to be
+       negative, i.e. $2 + (a - \beta)s - a\beta s^2 < 0$. In terms of $R$:
+
+       $$R_{opt} < R_{crit} = \frac{\beta - a + \sqrt{(a - \beta)^2 + 8 a \beta}}{4}$$
+
+       Above $R_{crit}$, a smaller R7 always gives a stronger weakest pulse.
+       $\beta = dT/C$ is the resistance at which the reservoir would drain in
+       about one burst.
+
+    2. **Pulse-current limit.** A fresh cell (up to ~3.2 V open-circuit,
+       handbook p3/p5) must not push the first pulse past the TSAL6200's
+       200 mA peak rating:
+
+       $$R_7 \ge R_{FM} = \frac{V_{max} - V_F(I_{FM})}{I_{FM}} - R_{DS(on)}$$
+
+    So the best R7 is $\max\!\big(R_{FM},\; R_{opt}\big)$ with
+    $R_{opt} < R_{crit}$. It also costs battery: a smaller R7 draws more
+    charge per press and sags VDD further. That's checked against the full
+    nonlinear simulation below.
+
+    **Decision:** R7 stays at 15 Ω for now. 10 Ω would give ~12 % stronger
+    weakest pulses (~6 % more range) for ~1–1.5 years less calculated life,
+    still above the cell's 10-year shelf life.
+    """)
+    return
+
+
+@app.cell
+def _(C_LED, CARRIER_DUTY, I_RUN, Q1_RDS, R8, led_vf, np):
+    T_LEADER_S = 9e-3
+    LED_I_FM = 0.200  # TSAL6200 peak forward current (tp/T = 0.5, tp = 100 us)
+    V_FRESH_MAX = 3.2  # fresh CR2032 OCV before first load (handbook p3/p5)
+
+    # LED linearised through the 30 mA and 100 mA datasheet points
+    _i1, _i2 = 0.030, 0.100
+    R_D = (led_vf(_i2) - led_vf(_i1)) / (_i2 - _i1)
+    V_F0 = led_vf(_i1) - R_D * _i1
+
+    def i_burst(t, r7, voc, rint, vf_shift=0.0):
+        """Closed-form pulse current after t seconds of a burst (A)."""
+        u = voc - rint * I_RUN - (V_F0 + vf_shift)
+        rs = rint + R8
+        r = r7 + Q1_RDS + R_D
+        a = CARRIER_DUTY * rs
+        tau = C_LED * rs * r / (r + a)
+        return u / (r + a) * (1 + a / r * np.exp(-t / tau))
+
+    def r_crit(rint):
+        """Upper bound on the optimal total pulse-path resistance R (Ohm)."""
+        a = CARRIER_DUTY * (rint + R8)
+        beta = CARRIER_DUTY * T_LEADER_S / C_LED
+        return (beta - a + np.sqrt((a - beta) ** 2 + 8 * a * beta)) / 4
+
+    def r7_opt_numeric(voc, rint, vf_shift=0.0):
+        """Numerical maximiser of the end-of-leader current over R7."""
+        r7 = np.linspace(0.5, 60, 4000)
+        return r7[np.argmax(i_burst(T_LEADER_S, r7, voc, rint, vf_shift))]
+
+    R7_FM = (V_FRESH_MAX - led_vf(LED_I_FM)) / LED_I_FM - Q1_RDS
+    return (
+        LED_I_FM,
+        R7_FM,
+        R_D,
+        T_LEADER_S,
+        V_F0,
+        V_FRESH_MAX,
+        i_burst,
+        r7_opt_numeric,
+        r_crit,
+    )
+
+
+@app.cell
+def _(
+    CASES,
+    I_RUN,
+    MAH,
+    OCV_CAP_MAH,
+    PRESSES_PER_DAY,
+    PRESS_WINDOWS,
+    PVD_ABORT_FIRMWARE,
+    PVD_ABORT_OPTIONS,
+    PVD_TX_OK,
+    REPEATS_PER_PRESS,
+    cell_model,
+    led_current,
+    np,
+    self_discharge_mah_per_year,
+    simulate,
+    standby_mah_per_year,
+    t_awake,
+):
+    R7_SWEEP = np.array([4.7, 6.8, 8.2, 10, 12, 15, 18, 22, 27, 33])
+    _abort_v = PVD_ABORT_OPTIONS[PVD_ABORT_FIRMWARE]
+
+    r7_sweep = {}
+    for _name, _p in CASES.items():
+        _life = np.arange(0.0, OCV_CAP_MAH[-1] * _p["cap_scale"], 2.0)
+        _voc, _rint = cell_model(_life, _p["cap_scale"], _p["ocv_offset"], _p["ir_scale"])
+        _vdd_rest = _voc - I_RUN * _rint
+        _rows = []
+        for _r7 in R7_SWEEP:
+            _vdd_min, _vled_min, _q = simulate(_voc, _rint, _p["vf_shift"], PRESS_WINDOWS, r7=_r7)
+            _dead = (_vdd_rest < PVD_TX_OK) | (_vdd_min < _abort_v)
+            _usable = _life[np.argmax(_dead)] if _dead.any() else _life[-1]
+            _half = np.argmin(np.abs(_life - _usable / 2))
+            _q_press = _q[0][0] + REPEATS_PER_PRESS * np.mean([_w[0] for _w in _q[1:]]) + I_RUN * t_awake
+            _per_year = PRESSES_PER_DAY * 365 * _q_press / MAH + standby_mah_per_year + self_discharge_mah_per_year
+            _rows.append(
+                {
+                    "r7": _r7,
+                    "usable_mah": _usable,
+                    "years": _usable / _per_year,
+                    "first_ma_fresh": 1e3 * led_current(_vdd_rest[:1], _p["vf_shift"], _r7)[0],
+                    "weak_ma_half": 1e3 * led_current(_vled_min[_half : _half + 1], _p["vf_shift"], _r7)[0],
+                    "voc_half": _voc[_half],
+                    "rint_half": _rint[_half],
+                }
+            )
+        r7_sweep[_name] = _rows
+    return R7_SWEEP, r7_sweep
+
+
+@app.cell(hide_code=True)
+def _(
+    CASES,
+    LED_I_FM,
+    R7,
+    R7_FM,
+    R_D,
+    Q1_RDS,
+    T_LEADER_S,
+    V_FRESH_MAX,
+    i_burst,
+    np,
+    plt,
+    r7_opt_numeric,
+    r7_sweep,
+    r_crit,
+):
+    _fig, (_ax1, _ax2) = plt.subplots(1, 2, figsize=(12, 4.4))
+    _r7 = np.linspace(2, 40, 300)
+    for (_name, _rows), _col in zip(r7_sweep.items(), ["tab:blue", "tab:green"]):
+        _voc, _rint = _rows[0]["voc_half"], _rows[0]["rint_half"]
+        _shift = CASES[_name]["vf_shift"]
+        _ax1.plot(_r7, 1e3 * i_burst(T_LEADER_S, _r7, _voc, _rint, _shift), color=_col,
+                  label=f"{_name}, half life: closed form")
+        _ax1.plot([r["r7"] for r in _rows], [r["weak_ma_half"] for r in _rows], "o", color=_col,
+                  label=f"{_name}, half life: full simulation (weakest pulse)")
+        _ropt = r7_opt_numeric(_voc, _rint, _shift)
+        _ax1.axvline(_ropt, color=_col, ls=":", lw=1)
+        _ax1.axvline(r_crit(_rint) - Q1_RDS - R_D, color=_col, ls="-.", lw=1)
+    _ax1.axvspan(0, R7_FM, color="tab:red", alpha=0.12, label=f"R7 < R_FM: first pulse > {LED_I_FM * 1e3:.0f} mA at {V_FRESH_MAX} V")
+    _ax1.axvline(R7, color="k", lw=1, label=f"Current R7 = {R7:g} Ω")
+    _ax1.set_xlabel("R7 (Ω)")
+    _ax1.set_ylabel("End-of-leader pulse current (mA)")
+    _ax1.set_title("Weakest pulse vs R7 (dotted: optimum, dash-dot: R_crit)", fontsize=10)
+    _ax1.set_xlim(2, 40)
+    _ax1.grid(alpha=0.3)
+    _ax1.legend(fontsize=7)
+
+    for (_name, _rows), _col in zip(r7_sweep.items(), ["tab:blue", "tab:green"]):
+        _ax2.plot([r["r7"] for r in _rows], [r["years"] for r in _rows], "o-", color=_col, label=f"Years, {_name}")
+    _ax2.axvspan(0, R7_FM, color="tab:red", alpha=0.12)
+    _ax2.axvline(R7, color="k", lw=1)
+    _ax2.set_xlabel("R7 (Ω)")
+    _ax2.set_ylabel("Battery life (years, typical leakage)")
+    _ax2.set_title("Battery life vs R7", fontsize=10)
+    _ax2.set_xlim(2, 40)
+    _ax2.grid(alpha=0.3)
+    _ax2.legend(fontsize=8)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(LED_I_FM, R7, R7_FM, R_D, V_F0, mo, r7_sweep):
+    _hdr = "| R7 | First pulse, fresh 21 °C | Weakest pulse, half life 21 °C | Weakest pulse, half life 0 °C | Years 21 °C | Years 0 °C |"
+    _rows = []
+    for _a, _b in zip(r7_sweep["21 °C"], r7_sweep["0 °C"]):
+        _mark = " ◀ current" if _a["r7"] == R7 else ""
+        _warn = " ⚠" if _a["first_ma_fresh"] > LED_I_FM * 1e3 * 0.9 else ""
+        _rows.append(
+            f"| {_a['r7']:g} Ω{_mark} | {_a['first_ma_fresh']:.0f} mA{_warn} | {_a['weak_ma_half']:.0f} mA "
+            f"| {_b['weak_ma_half']:.0f} mA | {_a['years']:.1f} | {_b['years']:.1f} |"
+        )
+    _body = "\n".join(_rows)
+    mo.md(
+        f"""
+    {_hdr}
+    |---|---|---|---|---|---|
+    {_body}
+
+    The first pulse here is at the fresh cell's loaded OCV. A brand-new cell
+    can briefly sit at ~3.2 V, which is what $R_{{FM}}$ = {R7_FM:.1f} Ω
+    guards against. ⚠ = within 10 % of the 200 mA rating. LED linearisation:
+    $V_F$ = {V_F0:.2f} V + {R_D:.2f} Ω × I.
+    """
+    )
     return
 
 if __name__ == "__main__":
