@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+
+  (lib (name "turbo_fan_remote") (type "KiCad") (uri "${KIPRJMOD}/turbo_fan_remote.kicad_sym") (options "") (descr "")))
