@@ -15,10 +15,24 @@ clean : cv_clean
 
 # Battery-life design calcs (marimo notebook, deps inline via PEP 723)
 CALCS:=../calcs/battery_life
+SCH:=../turbo_fan_remote
+KICAD_CLI?=kicad-cli
 
-calcs : $(CALCS).html
+calcs : $(CALCS).html $(CALCS).pdf
 
 $(CALCS).html : $(CALCS).py
-	uvx marimo export html --sandbox $< -o $@
+	uvx marimo export html --sandbox -f $< -o $@
 
-.PHONY : calcs
+$(CALCS).pdf : $(CALCS).py
+	uvx marimo export pdf --sandbox -f $< -o $@
+
+# Schematic PDF
+schematic : $(SCH).pdf
+
+$(SCH).pdf : $(SCH).kicad_sch
+	$(KICAD_CLI) sch export pdf -o $@ $<
+
+# Calcs and schematic, all as PDF
+pdf : $(CALCS).pdf $(SCH).pdf
+
+.PHONY : calcs schematic pdf
