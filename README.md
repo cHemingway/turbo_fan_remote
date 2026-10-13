@@ -8,9 +8,24 @@ An experiment in using Claude for component choice, design calcs and analysis, s
 
 
 ### Status
-Schematic done, PCB layout, enclosure (handlebar mount 3D print), bringup and test TODO
+[Code](fw/remote.c) done, [schematic](turbo_fan_remote.pdf) done, PCB layout, enclosure (handlebar mount 3D print), bringup and test TODO
+
+### Requires
+- Kicad 10
+- uv (we use PEP 723 to install more dependencies as needed)
+- RISC-V GCC toolchain. On macos I used the [official brew packages](https://github.com/riscv-software-src/homebrew-riscv)
+- GNU make
+- clang if you want IDE assistance through `make clangd`
+
+### Building
+```
+git submodule update --init
+cd fw
+make flash # Builds and flashes code
+make pdf # Makes PDFs of the schematic and calculations
+```
 
 ### Credits
 - Claude Opus 5.5: Code, component choices (apart from CH32L103), design calculations, schematics
 - [mixelpixx/Konnect](https://github.com/mixelpixx/Konnect) for Claude to Kicad integration
-- [chlor/ch32fun](https://github.com/cnlohr/ch32fun) for the MCU libraries/build tools
+- [cnhlohr/ch32fun](https://github.com/cnlohr/ch32fun) for the MCU libraries/build tools
